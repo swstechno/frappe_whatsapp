@@ -1,6 +1,7 @@
 # Copyright (c) 2022, Shridhar Patil and contributors
 # For license information, please see license.txt
 import json
+import re
 import frappe
 from frappe import _, throw
 from frappe.model.document import Document
@@ -324,13 +325,26 @@ class WhatsAppMessage(Document):
                         "parameters": [{"type": "payload", "payload": btn.button_label}]
                     })
                 elif btn.button_type == "Visit Website" and btn.url_type == "Dynamic":
-                    ref_doc = frappe.get_doc(self.reference_doctype, self.reference_name)
-                    url = ref_doc.get_formatted(btn.website_url)
+                    # For dynamic URL buttons, WhatsApp expects only the runtime placeholder value,
+                    # not the full URL. Reuse the body template parameter by index when available.
+                    url = None
+                    placeholder_match = re.search(r"\{\{\s*(\d+)\s*\}\}", btn.website_url or "")
+                    if placeholder_match and template_parameters:
+                        param_idx = int(placeholder_match.group(1)) - 1
+                        if 0 <= param_idx < len(template_parameters):
+                            url = template_parameters[param_idx]
+
+                    if url is None and template_parameters:
+                        url = template_parameters[0]
+
+                    if url is None:
+                        continue
+
                     button_parameters.append({
                         "type": "button",
                         "sub_type": "url",
                         "index": current_idx,
-                        "parameters": [{"type": "text", "text": url}]
+                        "parameters": [{"type": "text", "text": str(url)}]
                     })
 
             if button_parameters:

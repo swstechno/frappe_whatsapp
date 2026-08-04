@@ -6,9 +6,11 @@ import json
 import frappe
 import magic
 import requests
+from frappe import _, throw
 from frappe.model.document import Document
 from frappe.integrations.utils import make_post_request, make_request
 from frappe.desk.form.utils import get_pdf_link
+from frappe.utils import cint
 
 from frappe_whatsapp.utils import get_whatsapp_account
 
@@ -387,14 +389,18 @@ def fetch():
                             btn["sequence"] = i
 
                             if button["type"] == "URL":
-                                btn["website_url"] = button.get("url")
-                                if "{{" in btn["website_url"]:
+                                btn["website_url"] = _truncate_to_field_length(
+                                    "WhatsApp Button", "website_url", button.get("url")
+                                )
+                                if "{{" in (btn["website_url"] or ""):
                                     btn["url_type"] = "Dynamic"
                                 else:
                                     btn["url_type"] = "Static"
 
                                 if button.get("example"):
-                                    btn["example_url"] = ",".join(button["example"])
+                                    btn["example_url"] = _truncate_to_field_length(
+                                        "WhatsApp Button", "example_url", ",".join(button["example"])
+                                    )
                             elif button["type"] == "PHONE_NUMBER":
                                 btn["phone_number"] = button.get("phone_number")
                             elif button["type"] == "FLOW":
@@ -408,10 +414,11 @@ def fetch():
 
         except Exception as e:
             # Check if frappe.flags.integration_request is set and has a .json() method
-            if hasattr(frappe.flags.integration_request, 'json'):
+            integration_request = getattr(frappe.flags, "integration_request", None)
+            if integration_request and hasattr(integration_request, "json"):
                 try:
-                    res = frappe.flags.integration_request.json().get("error", {})
-                    error_message = res.get("error_user_msg", res.get("message"))
+                    res = integration_request.json().get("error", {})
+                    error_message = res.get("error_user_msg") or res.get("message") or str(e)
                     frappe.throw(
                         msg=error_message,
                         title=res.get("error_user_title", "Error"),
@@ -435,3 +442,19 @@ def upsert_doc_without_hooks(doc, child_dt, child_field):
         d.parenttype = doc.doctype
         d.parentfield = child_field
         d.db_insert()
+
+
+def _truncate_to_field_length(doctype, fieldname, value):
+    if value is None:
+        return None
+
+    value = str(value)
+    df = frappe.get_meta(doctype).get_field(fieldname)
+    if not df:
+        return value
+
+    max_len = cint(df.length) or (140 if df.fieldtype == "Data" else 0)
+    if max_len and len(value) > max_len:
+        return value[:max_len]
+
+    return value
