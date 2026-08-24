@@ -284,6 +284,134 @@ class TestWhatsAppTemplates(IntegrationTestCase):
         result = fetch()
         self.assertEqual(result, "Successfully fetched templates from meta")
 
+    @patch("frappe_whatsapp.frappe_whatsapp.doctype.whatsapp_templates.whatsapp_templates.make_post_request")
+    def test_field_names_only_save_skips_meta(self, mock_post):
+        """Editing field_names alone must not re-submit the template to Meta."""
+        self._make_template_without_hooks(template_name="test_tmpl_local_edit")
+        doc = frappe.get_doc("WhatsApp Templates", "test_tmpl_local_edit-en")
+        doc.field_names = "customer_nickname,order_ref"
+        doc.save(ignore_permissions=True)
+
+        self.assertFalse(mock_post.called)
+        self.assertEqual(
+            frappe.db.get_value("WhatsApp Templates", doc.name, "field_names"),
+            "customer_nickname,order_ref",
+        )
+
+    @patch("frappe_whatsapp.frappe_whatsapp.doctype.whatsapp_templates.whatsapp_templates.make_post_request")
+    def test_body_change_still_updates_meta(self, mock_post):
+        """A change to the template body still posts the update to Meta."""
+        mock_post.return_value = {}
+        self._make_template_without_hooks(template_name="test_tmpl_body_edit")
+        doc = frappe.get_doc("WhatsApp Templates", "test_tmpl_body_edit-en")
+        doc.template = "Goodbye {{1}}"
+        doc.save(ignore_permissions=True)
+
+        self.assertTrue(mock_post.called)
+
+    def test_get_header_media_without_fresh_sample_throws(self):
+        """A media header without a fresh sample upload raises a clear error,
+        not an AttributeError on the missing _media_id."""
+        doc = self._make_template_without_hooks(
+            template_name="test_tmpl_hdr_media",
+            header_type="IMAGE",
+        )
+        with self.assertRaises(frappe.ValidationError):
+            doc.get_header()
+
+    @patch("frappe.model.document.Document.get_password", return_value="mock_token")
+    @patch("frappe_whatsapp.frappe_whatsapp.doctype.whatsapp_templates.whatsapp_templates.make_request")
+    @patch("frappe_whatsapp.frappe_whatsapp.doctype.whatsapp_templates.whatsapp_templates.make_post_request")
+    def test_fetch_keeps_field_names_on_update(self, mock_post, mock_get, mock_get_password):
+        """An in-place sync leaves field_names untouched."""
+        self._make_template_without_hooks(template_name="test_tmpl_keep")
+        frappe.db.set_value(
+            "WhatsApp Templates", "test_tmpl_keep-en", "field_names", "order_ref,grand_total"
+        )
+        mock_get.return_value = {
+            "data": [
+                {
+                    "name": "test_tmpl_keep",
+                    "status": "APPROVED",
+                    "language": "en",
+                    "category": "UTILITY",
+                    "id": "keep_tmpl_id",
+                    "components": [{"type": "BODY", "text": "Order {{1}}, total {{2}}"}],
+                }
+            ]
+        }
+
+        from frappe_whatsapp.frappe_whatsapp.doctype.whatsapp_templates.whatsapp_templates import fetch
+        fetch()
+
+        self.assertEqual(
+            frappe.db.get_value("WhatsApp Templates", "test_tmpl_keep-en", "field_names"),
+            "order_ref,grand_total",
+        )
+        self.assertEqual(
+            frappe.db.count("WhatsApp Templates", {"actual_name": "test_tmpl_keep"}), 1
+        )
+
+    @patch("frappe.model.document.Document.get_password", return_value="mock_token")
+    @patch("frappe_whatsapp.frappe_whatsapp.doctype.whatsapp_templates.whatsapp_templates.make_request")
+    @patch("frappe_whatsapp.frappe_whatsapp.doctype.whatsapp_templates.whatsapp_templates.make_post_request")
+    def test_fetch_restores_field_names_after_desk_delete(self, mock_post, mock_get, mock_get_password):
+        """A record recreated by the sync after a desk deletion gets its
+        field_names back from the deleted record."""
+        doc = self._make_template_without_hooks(template_name="test_tmpl_restore")
+        frappe.db.set_value(
+            "WhatsApp Templates", doc.name, "field_names", "items_ready,order_ref"
+        )
+        mock_get.return_value = {}
+        frappe.delete_doc("WhatsApp Templates", doc.name, ignore_permissions=True)
+
+        mock_get.return_value = {
+            "data": [
+                {
+                    "name": "test_tmpl_restore",
+                    "status": "APPROVED",
+                    "language": "en",
+                    "category": "UTILITY",
+                    "id": "restore_tmpl_id",
+                    "components": [{"type": "BODY", "text": "Ready: {{1}}, order {{2}}"}],
+                }
+            ]
+        }
+
+        from frappe_whatsapp.frappe_whatsapp.doctype.whatsapp_templates.whatsapp_templates import fetch
+        fetch()
+
+        self.assertEqual(
+            frappe.db.get_value(
+                "WhatsApp Templates", {"actual_name": "test_tmpl_restore"}, "field_names"
+            ),
+            "items_ready,order_ref",
+        )
+
+    @patch("frappe_whatsapp.frappe_whatsapp.doctype.whatsapp_templates.whatsapp_templates.make_post_request")
+    def test_field_names_only_save_with_buttons_skips_meta(self, mock_post):
+        """A button field the form posts as "" where the DB holds NULL is not a
+        change worth re-submitting to Meta."""
+        parent = self._make_template_without_hooks(template_name="test_tmpl_btn_norm")
+        btn = frappe.get_doc({
+            "doctype": "WhatsApp Button",
+            "parent": parent.name,
+            "parenttype": "WhatsApp Templates",
+            "parentfield": "buttons",
+            "button_type": "Quick Reply",
+            "button_label": "Yes",
+            "idx": 1,
+        })
+        btn.db_insert()
+        frappe.db.commit()  # nosemgrep: frappe-manual-commit -- test fixture must be visible to later queries
+
+        doc = frappe.get_doc("WhatsApp Templates", parent.name)
+        doc.buttons[0].website_url = ""
+        doc.field_names = "order_ref"
+        doc.save(ignore_permissions=True)
+
+        self.assertFalse(mock_post.called)
+
     def test_upsert_doc_without_hooks(self):
         """Test upsert_doc_without_hooks inserts and updates correctly."""
         from frappe_whatsapp.frappe_whatsapp.doctype.whatsapp_templates.whatsapp_templates import upsert_doc_without_hooks
