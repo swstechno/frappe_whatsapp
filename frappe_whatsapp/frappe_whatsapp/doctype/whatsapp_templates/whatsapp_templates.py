@@ -9,7 +9,6 @@ import requests
 from frappe import _, throw
 from frappe.model.document import Document
 from frappe.integrations.utils import make_post_request, make_request
-from frappe.desk.form.utils import get_pdf_link
 from frappe.utils import cint
 
 from frappe_whatsapp.utils import get_whatsapp_account
@@ -17,18 +16,51 @@ from frappe_whatsapp.utils import get_whatsapp_account
 class WhatsAppTemplates(Document):  # nosemgrep: frappe-modifying-but-not-committing-other-method -- get_settings() sets self._token/_url/_version/_business_id/_app_id/_headers as in-memory scratch for the outbound Meta HTTP call; they are not DocType fields and must not be persisted
     """Create whatsapp template."""
 
+    # The fields update_template() actually transmits to Meta. A save that
+    # changes none of these (e.g. editing field_names) must not re-submit the
+    # template: every re-submission kicks an approved template back to pending
+    # review, and a media-header re-submission demands a fresh sample upload.
+    META_TEMPLATE_FIELDS = (
+        "template",
+        "sample_values",
+        "header_type",
+        "header",
+        "sample",
+        "footer",
+    )
+
     def validate(self):
         self.set_whatsapp_account()
         if not self.language_code or self.has_value_changed("language"):
             lang_code = frappe.db.get_value("Language", self.language) or "en"
             self.language_code = lang_code.replace("-", "_")
 
-        if self.header_type in ["IMAGE", "DOCUMENT"] and self.sample:
+        needs_meta_update = self.is_new() or self.meta_template_fields_changed()
+
+        if needs_meta_update and self.header_type in ["IMAGE", "DOCUMENT"] and self.sample:
             self.get_session_id(self.sample)
             self.get_media_id(self.sample)
 
-        if not self.is_new():
+        if not self.is_new() and needs_meta_update:
             self.update_template()
+
+    def meta_template_fields_changed(self):
+        """Whether this save changes anything that is part of the Meta payload."""
+        before = self.get_doc_before_save()
+        if not before:
+            return True
+        if any((self.get(f) or "") != (before.get(f) or "") for f in self.META_TEMPLATE_FIELDS):
+            return True
+
+        def rows(buttons):
+            # None and "" are the same absent value: the desk posts "" where a
+            # fresh DB load holds NULL, and that must not count as a change.
+            return [
+                {k: v or "" for k, v in d.as_dict(no_default_fields=True).items()}
+                for d in buttons or []
+            ]
+
+        return rows(self.buttons) != rows(before.buttons)
 
     def set_whatsapp_account(self):
         """Set whatsapp account to default if missing"""
@@ -292,11 +324,14 @@ class WhatsAppTemplates(Document):  # nosemgrep: frappe-modifying-but-not-commit
                 samples = self.sample.split(", ")
                 header.update({"example": {"header_text": samples}})
         else:
-            pdf_link = ''
-            if not self.sample:
-                key = frappe.get_doc(self.doctype, self.name).get_document_share_key()
-                link = get_pdf_link(self.doctype, self.name)
-                pdf_link = f"{frappe.utils.get_url()}{link}&key={key}"
+            if not getattr(self, "_media_id", None):
+                frappe.throw(
+                    _(
+                        "Attach the sample file again before saving. Meta needs a fresh"
+                        " media upload every time a template with a {0} header is submitted."
+                    ).format(self.header_type),
+                    title=_("Header sample required"),
+                )
             header.update({"example": {"header_handle": [self._media_id]}})
 
         return header
@@ -324,15 +359,16 @@ def fetch():
             )
 
             for template in response["data"]:
-                # set flag to insert or update
-                flags = 1
                 if frappe.db.exists("WhatsApp Templates", {"actual_name": template["name"]}):
                     doc = frappe.get_doc("WhatsApp Templates", {"actual_name": template["name"]})
                 else:
-                    flags = 0
                     doc = frappe.new_doc("WhatsApp Templates")
                     doc.template_name = template["name"]
                     doc.actual_name = template["name"]
+                    # field_names is site-local configuration Meta knows nothing
+                    # about; a record recreated after a desk deletion gets it
+                    # back from the deleted record instead of coming up empty.
+                    doc.field_names = _field_names_from_deleted_record(template["name"])
 
                 doc.status = template["status"]
                 doc.language_code = template["language"]
@@ -442,6 +478,30 @@ def upsert_doc_without_hooks(doc, child_dt, child_field):
         d.parenttype = doc.doctype
         d.parentfield = child_field
         d.db_insert()
+
+
+def _field_names_from_deleted_record(actual_name):
+    """field_names of the most recently deleted record of this template.
+
+    A desk delete is the one removal that leaves a trail — the record's JSON in
+    Deleted Document — so it is the one removal a later sync can repair. The
+    scan is bounded to the recent past; a template deleted long ago is treated
+    as configuration deliberately discarded.
+    """
+    for row in frappe.get_all(
+        "Deleted Document",
+        filters={"deleted_doctype": "WhatsApp Templates"},
+        fields=["data"],
+        order_by="creation desc",
+        limit=20,
+    ):
+        try:
+            data = json.loads(row.data or "{}")
+        except ValueError:
+            continue
+        if data.get("actual_name") == actual_name and data.get("field_names"):
+            return data["field_names"]
+    return None
 
 
 def _truncate_to_field_length(doctype, fieldname, value):
