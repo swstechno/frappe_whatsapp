@@ -265,7 +265,9 @@ class WhatsAppMessage(Document):
                             "type": "document",
                             "document": {
                                 "link": url,
-                                "filename": "document.pdf"  # should be configurable
+                                # Callers name the file through flags.document_filename;
+                                # Meta shows this name to the recipient as-is.
+                                "filename": self.flags.get("document_filename") or "document.pdf"
                             }
                         }]
                     })

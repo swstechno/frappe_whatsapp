@@ -407,3 +407,61 @@ class TestWhatsAppMessage(IntegrationTestCase):
         self.assertNotIn("phone_number", sub_types)
         self.assertNotIn("url", sub_types)  # static URL button also excluded
         self.assertIn("quick_reply", sub_types)
+
+    def _document_header_template(self):
+        template_name = "test_msg_document_template-en"
+        if not frappe.db.exists("WhatsApp Templates", template_name):
+            tmpl = frappe.get_doc({
+                "doctype": "WhatsApp Templates",
+                "template_name": "test_msg_document_template",
+                "actual_name": "test_msg_document_template",
+                "template": "Your order",
+                "category": "TRANSACTIONAL",
+                "language": frappe.db.get_value("Language", {"language_code": "en"}) or "en",
+                "language_code": "en",
+                "header_type": "DOCUMENT",
+                "whatsapp_account": "Test WA Msg Account",
+                "status": "APPROVED",
+                "id": "test_template_document_id",
+                "name": template_name,
+            })
+            tmpl.flags.ignore_validate = True
+            tmpl.db_insert()
+            frappe.db.commit()  # nosemgrep: frappe-manual-commit -- test fixture must be visible to later queries
+        return template_name
+
+    def _send_document_template(self, mock_post, to, document_filename=None):
+        mock_post.return_value = {"messages": [{"id": f"wamid.test_doc_{to}"}]}
+        doc = frappe.get_doc({
+            "doctype": "WhatsApp Message",
+            "type": "Outgoing",
+            "to": to,
+            "message_type": "Template",
+            "content_type": "text",
+            "template": self._document_header_template(),
+            "attach": "https://example.com/api/method/get_pdf?token=abc",
+            "whatsapp_account": "Test WA Msg Account",
+        })
+        if document_filename:
+            doc.flags.document_filename = document_filename
+        doc.insert(ignore_permissions=True)
+
+        sent_data = json.loads(mock_post.call_args.kwargs["data"])
+        header = next(c for c in sent_data["template"]["components"] if c["type"] == "header")
+        return header["parameters"][0]["document"]
+
+    @patch("frappe_whatsapp.frappe_whatsapp.doctype.whatsapp_message.whatsapp_message.make_post_request")
+    def test_document_header_uses_caller_filename(self, mock_post):
+        """A caller-supplied flags.document_filename is the name Meta shows the
+        recipient for a DOCUMENT header, instead of a generic document.pdf."""
+        document = self._send_document_template(
+            mock_post, "919900112265", document_filename="ORD-TEST-01-260915-009.pdf"
+        )
+        self.assertEqual(document["filename"], "ORD-TEST-01-260915-009.pdf")
+        self.assertEqual(document["link"], "https://example.com/api/method/get_pdf?token=abc")
+
+    @patch("frappe_whatsapp.frappe_whatsapp.doctype.whatsapp_message.whatsapp_message.make_post_request")
+    def test_document_header_defaults_filename(self, mock_post):
+        """Without the flag, a DOCUMENT header keeps the document.pdf default."""
+        document = self._send_document_template(mock_post, "919900112266")
+        self.assertEqual(document["filename"], "document.pdf")
