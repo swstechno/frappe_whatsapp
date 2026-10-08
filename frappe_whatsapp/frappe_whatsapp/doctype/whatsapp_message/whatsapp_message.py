@@ -262,13 +262,17 @@ class WhatsAppMessage(Document):
                     })
 
                 elif template.header_type == 'DOCUMENT':
+                    # Callers name the file through flags.document_filename;
+                    # Meta shows this name to the recipient as-is, so coerce it
+                    # to a string and fall back when it is blank.
+                    filename = str(self.flags.get("document_filename") or "").strip()
                     data['template']['components'].append({
                         "type": "header",
                         "parameters": [{
                             "type": "document",
                             "document": {
                                 "link": url,
-                                "filename": "document.pdf"  # should be configurable
+                                "filename": filename or "document.pdf"
                             }
                         }]
                     })
