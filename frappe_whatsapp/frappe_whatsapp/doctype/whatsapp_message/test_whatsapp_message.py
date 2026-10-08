@@ -425,7 +425,6 @@ class TestWhatsAppMessage(IntegrationTestCase):
                 "id": "test_template_document_id",
                 "name": template_name,
             })
-            tmpl.flags.ignore_validate = True
             tmpl.db_insert()
             frappe.db.commit()  # nosemgrep: frappe-manual-commit -- test fixture must be visible to later queries
         return template_name
@@ -442,7 +441,7 @@ class TestWhatsAppMessage(IntegrationTestCase):
             "attach": "https://example.com/api/method/get_pdf?token=abc",
             "whatsapp_account": "Test WA Msg Account",
         })
-        if document_filename:
+        if document_filename is not None:
             doc.flags.document_filename = document_filename
         doc.insert(ignore_permissions=True)
 
@@ -455,7 +454,7 @@ class TestWhatsAppMessage(IntegrationTestCase):
         """A caller-supplied flags.document_filename is the name Meta shows the
         recipient for a DOCUMENT header, instead of a generic document.pdf."""
         document = self._send_document_template(
-            mock_post, "919900112265", document_filename="ORD-TEST-01-260915-009.pdf"
+            mock_post, "919900112267", document_filename="ORD-TEST-01-260915-009.pdf"
         )
         self.assertEqual(document["filename"], "ORD-TEST-01-260915-009.pdf")
         self.assertEqual(document["link"], "https://example.com/api/method/get_pdf?token=abc")
@@ -463,5 +462,16 @@ class TestWhatsAppMessage(IntegrationTestCase):
     @patch("frappe_whatsapp.frappe_whatsapp.doctype.whatsapp_message.whatsapp_message.make_post_request")
     def test_document_header_defaults_filename(self, mock_post):
         """Without the flag, a DOCUMENT header keeps the document.pdf default."""
-        document = self._send_document_template(mock_post, "919900112266")
+        document = self._send_document_template(mock_post, "919900112268")
+        self.assertEqual(document["filename"], "document.pdf")
+
+    @patch("frappe_whatsapp.frappe_whatsapp.doctype.whatsapp_message.whatsapp_message.make_post_request")
+    def test_document_header_normalises_filename(self, mock_post):
+        """A non-string flag is sent as a string and a blank one falls back to
+        document.pdf, since Meta expects a non-empty string filename."""
+        document = self._send_document_template(mock_post, "919900112269", document_filename=123)
+        self.assertEqual(document["filename"], "123")
+        document = self._send_document_template(mock_post, "919900112271", document_filename="  ORD-1.pdf  ")
+        self.assertEqual(document["filename"], "ORD-1.pdf")
+        document = self._send_document_template(mock_post, "919900112272", document_filename="   ")
         self.assertEqual(document["filename"], "document.pdf")
