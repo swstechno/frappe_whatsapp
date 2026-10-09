@@ -57,8 +57,11 @@ class WhatsAppMessage(Document):
         self.set_whatsapp_account()
         # Route to template path when a template is selected,
         # since message_type is read_only and cannot be set from the UI.
+        # use_template too: callers inserting from code set only `template`,
+        # and the form hides the Template field while use_template is off.
         if self.template:
             self.message_type = "Template"
+            self.use_template = 1
         self.send_outgoing()
         self.create_whatsapp_profile()
 
@@ -259,13 +262,17 @@ class WhatsAppMessage(Document):
                     })
 
                 elif template.header_type == 'DOCUMENT':
+                    # Callers name the file through flags.document_filename;
+                    # Meta shows this name to the recipient as-is, so coerce it
+                    # to a string and fall back when it is blank.
+                    filename = str(self.flags.get("document_filename") or "").strip()
                     data['template']['components'].append({
                         "type": "header",
                         "parameters": [{
                             "type": "document",
                             "document": {
                                 "link": url,
-                                "filename": "document.pdf"  # should be configurable
+                                "filename": filename or "document.pdf"
                             }
                         }]
                     })
